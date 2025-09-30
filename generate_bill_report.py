@@ -9,7 +9,7 @@ import sqlite3
 import os
 import sys
 import argparse
-from datetime import datetime
+from datetime import datetime,timezone
 from decimal import Decimal
 
 def connect_database(db_path):
@@ -63,11 +63,61 @@ def get_latest_update_time(conn, year, month):
         result = cursor.fetchone()
         if result and result[0]:
             # 将Unix时间戳转换为可读格式
-            update_time = datetime.fromtimestamp(result[0])
-            return update_time.strftime('%Y-%m-%d %H:%M:%S')
+            update_time = datetime.fromtimestamp(result[0], timezone.utc)
+            return update_time.strftime('%Y-%m-%d %H:%M UTC')
         return "未知"
     except sqlite3.Error as e:
         print(f"获取更新时间错误: {e}")
+        return "未知"
+
+def get_annual_data(conn, year):
+    """获取指定年份的月度汇总数据"""
+    year_str = str(year)
+    date_pattern = f"{year_str}-%"
+    
+    query = """
+    SELECT 
+        SUBSTR(TIME, 1, 7) as month,
+        SUM(AMOUNT) as total_amount,
+        COUNT(*) as transaction_count,
+        MAX(UPDATE_TIME) as latest_update
+    FROM BILL 
+    WHERE TIME LIKE ? AND TYPE = '消费'
+    GROUP BY SUBSTR(TIME, 1, 7)
+    ORDER BY month ASC
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, (date_pattern,))
+        data = cursor.fetchall()
+        return data
+    except sqlite3.Error as e:
+        print(f"查询年度数据错误: {e}")
+        return []
+
+def get_annual_latest_update_time(conn, year):
+    """获取指定年份数据的最新更新时间"""
+    year_str = str(year)
+    date_pattern = f"{year_str}-%"
+    
+    query = """
+    SELECT MAX(UPDATE_TIME) 
+    FROM BILL 
+    WHERE TIME LIKE ? AND TYPE = '消费'
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, (date_pattern,))
+        result = cursor.fetchone()
+        if result and result[0]:
+            # 将Unix时间戳转换为可读格式
+            update_time = datetime.fromtimestamp(result[0], timezone.utc)
+            return update_time.strftime('%Y-%m-%d %H:%M UTC')
+        return "未知"
+    except sqlite3.Error as e:
+        print(f"获取年度更新时间错误: {e}")
         return "未知"
 
 def calculate_total_amount(data):
@@ -313,17 +363,204 @@ def generate_html(data, total_amount, update_time, year, month):
     
     return html_content
 
+def generate_annual_html(monthly_data, total_amount, update_time, year):
+    """生成年度账单HTML页面"""
+    html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{year}年度账单</title>
+    <style>
+        body {{
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: white;
+            color: #333;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+        }}
+        .header {{
+            padding: 20px 0;
+            border-bottom: 1px solid #eee;
+            position: relative;
+        }}
+        .header h1 {{
+            margin: 0 0 20px 0;
+            font-size: 1.4em;
+            font-weight: 500;
+            color: #333;
+        }}
+        .total-amount {{
+            font-size: 3em;
+            font-weight: bold;
+            color: #333;
+            margin: 20px 0;
+        }}
+        .update-time {{
+            position: absolute;
+            top: 20px;
+            right: 0;
+            font-size: 0.9em;
+            color: #666;
+            text-align: right;
+        }}
+        .sort-control {{
+            position: absolute;
+            top: 85px;
+            right: 0;
+            z-index: 10;
+        }}
+        .sort-select {{
+            padding: 8px 12px;
+            border: 1px solid #333;
+            background: white;
+            font-size: 0.9em;
+            cursor: pointer;
+        }}
+        .monthly-list {{
+            margin-top: 20px;
+        }}
+        .monthly-item {{
+            display: block;
+            padding: 20px 0;
+            border-bottom: 1px solid #eee;
+            position: relative;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+        }}
+        .monthly-item:last-child {{
+            border-bottom: none;
+        }}
+        .monthly-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }}
+        .month-label {{
+            font-size: 1.1em;
+            font-weight: 500;
+            color: #333;
+        }}
+        .month-amount {{
+            font-size: 1.1em;
+            font-weight: 500;
+            color: #333;
+        }}
+        .progress-bar-container {{
+            width: 100%;
+            height: 12px;
+            background-color: #f0f0f0;
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+        }}
+        .progress-bar {{
+            height: 100%;
+            background-color: #007bff;
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }}
+    </style>
+    <script>
+        function sortMonthlyData() {{
+            const select = document.getElementById('sortSelect');
+            const monthlyList = document.querySelector('.monthly-list');
+            const monthlyItems = Array.from(monthlyList.querySelectorAll('.monthly-item'));
+            
+            if (select.value === 'amount') {{
+                // 按金额降序排序
+                monthlyItems.sort((a, b) => {{
+                    const amountA = parseFloat(a.querySelector('.month-amount').textContent.replace('¥', ''));
+                    const amountB = parseFloat(b.querySelector('.month-amount').textContent.replace('¥', ''));
+                    return amountB - amountA;
+                }});
+            }} else {{
+                // 按时间排序（原始顺序）
+                monthlyItems.sort((a, b) => {{
+                    const monthA = a.querySelector('.month-label').textContent;
+                    const monthB = b.querySelector('.month-label').textContent;
+                    return monthA.localeCompare(monthB);
+                }});
+            }}
+            
+            // 重新排列DOM元素
+            monthlyItems.forEach(item => monthlyList.appendChild(item));
+        }}
+        
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="update-time">数据更新时间<br>{update_time}</div>
+            <div class="sort-control">
+                <select class="sort-select" id="sortSelect" onchange="sortMonthlyData()">
+                    <option value="time">按时间排序</option>
+                    <option value="amount">按金额排序</option>
+                </select>
+            </div>
+            <h1>{year}年度账单</h1>
+            <div class="total-amount">{format_amount(total_amount)}</div>
+        </div>
+        
+        <div class="monthly-list">"""
+
+    # 计算最大金额用于进度条比例
+    max_amount = max([float(row[1]) for row in monthly_data]) if monthly_data else 1
+    
+    # 添加月度数据
+    for row in monthly_data:
+        month_str = row[0]  # 格式: YYYY-MM
+        amount = float(row[1])
+        transaction_count = row[2]
+        
+        # 提取月份数字
+        month_num = int(month_str.split('-')[1])
+        month_display = f"{month_num:02d}月"
+        
+        # 计算进度条宽度百分比
+        progress_width = (amount / max_amount) * 100 if max_amount > 0 else 0
+        
+        # 生成月度账单文件名
+        month_filename = f"bill_{year}_{month_num:02d}.html"
+        
+        html_content += f"""
+            <a href="{month_filename}" class="monthly-item">
+                <div class="monthly-header">
+                    <div class="month-label">{month_display}</div>
+                    <div class="month-amount">{format_amount(amount)}</div>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" style="width: {progress_width:.1f}%"></div>
+                </div>
+            </a>"""
+
+    html_content += """
+        </div>
+    </div>
+</body>
+</html>"""
+    
+    return html_content
+
 def parse_arguments():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='生成指定月份的账单明细HTML页面')
+    parser = argparse.ArgumentParser(description='生成账单明细HTML页面')
     parser.add_argument('year', type=int, help='年份 (例如: 2025)')
-    parser.add_argument('month', type=int, help='月份 (1-12)')
+    parser.add_argument('--month', type=int, help='月份 (1-12)，不指定则生成年度账单')
     parser.add_argument('--db', default='billing.sqlite', help='数据库文件路径 (默认: billing.sqlite)')
     
     args = parser.parse_args()
     
-    # 验证月份范围
-    if not (1 <= args.month <= 12):
+    # 验证月份范围（如果指定了月份）
+    if args.month is not None and not (1 <= args.month <= 12):
         print("错误: 月份必须在1-12之间")
         sys.exit(1)
     
@@ -349,39 +586,71 @@ def main():
         return
     
     try:
-        # 获取指定年月数据
-        print(f"正在提取{year}年{month}月消费数据...")
-        data = get_monthly_data(conn, year, month)
-        
-        if not data:
-            print(f"未找到{year}年{month}月的消费数据")
-            return
-        
-        print(f"找到 {len(data)} 条消费记录")
-        
-        # 计算总金额
-        total_amount = calculate_total_amount(data)
-        print(f"总金额: {format_amount(total_amount)}")
-        
-        # 获取最新更新时间
-        update_time = get_latest_update_time(conn, year, month)
-        print(f"数据更新时间: {update_time}")
-        
-        # 生成HTML
-        print("正在生成HTML页面...")
-        html_content = generate_html(data, total_amount, update_time, year, month)
-        
         # 确保web目录存在
         web_dir = "web"
         if not os.path.exists(web_dir):
             os.makedirs(web_dir)
         
-        # 保存HTML文件，命名规则为 bill_yyyy_MM.html
-        output_file = os.path.join(web_dir, f"bill_{year}_{month:02d}.html")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(html_content)
+        if month is not None:
+            # 生成月度账单
+            print(f"正在提取{year}年{month}月消费数据...")
+            data = get_monthly_data(conn, year, month)
+            
+            if not data:
+                print(f"未找到{year}年{month}月的消费数据")
+                return
+            
+            print(f"找到 {len(data)} 条消费记录")
+            
+            # 计算总金额
+            total_amount = calculate_total_amount(data)
+            print(f"总金额: {format_amount(total_amount)}")
+            
+            # 获取最新更新时间
+            update_time = get_latest_update_time(conn, year, month)
+            print(f"数据更新时间: {update_time}")
+            
+            # 生成HTML
+            print("正在生成HTML页面...")
+            html_content = generate_html(data, total_amount, update_time, year, month)
+            
+            # 保存HTML文件，命名规则为 bill_yyyy_MM.html
+            output_file = os.path.join(web_dir, f"bill_{year}_{month:02d}.html")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"HTML页面已生成: {output_file}")
+            
+        else:
+            # 生成年度账单
+            print(f"正在提取{year}年度消费数据...")
+            monthly_data = get_annual_data(conn, year)
+            
+            if not monthly_data:
+                print(f"未找到{year}年的消费数据")
+                return
+            
+            print(f"找到 {len(monthly_data)} 个月的数据")
+            
+            # 计算总金额
+            total_amount = sum([float(row[1]) for row in monthly_data])
+            print(f"总金额: {format_amount(total_amount)}")
+            
+            # 获取最新更新时间
+            update_time = get_annual_latest_update_time(conn, year)
+            print(f"数据更新时间: {update_time}")
+            
+            # 生成HTML
+            print("正在生成年度HTML页面...")
+            html_content = generate_annual_html(monthly_data, total_amount, update_time, year)
+            
+            # 保存HTML文件，命名规则为 bill_yyyy_annual.html
+            output_file = os.path.join(web_dir, f"bill_{year}_annual.html")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"年度HTML页面已生成: {output_file}")
         
-        print(f"HTML页面已生成: {output_file}")
         print("生成完成！")
         
     finally:
