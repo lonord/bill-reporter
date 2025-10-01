@@ -9,7 +9,7 @@ import sqlite3
 import os
 import sys
 import argparse
-from datetime import datetime,timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 def connect_database(db_path):
@@ -118,6 +118,131 @@ def get_annual_latest_update_time(conn, year):
         return "未知"
     except sqlite3.Error as e:
         print(f"获取年度更新时间错误: {e}")
+        return "未知"
+
+def get_all_years_data(conn):
+    """获取所有年份的消费数据汇总"""
+    query = """
+    SELECT 
+        SUBSTR(TIME, 1, 4) as year,
+        SUM(AMOUNT) as total_amount,
+        COUNT(*) as transaction_count,
+        MAX(UPDATE_TIME) as latest_update
+    FROM BILL 
+    WHERE TYPE = '消费'
+    GROUP BY SUBSTR(TIME, 1, 4)
+    ORDER BY year DESC
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        data = cursor.fetchall()
+        return data
+    except sqlite3.Error as e:
+        print(f"查询所有年份数据错误: {e}")
+        return []
+
+def get_recent_3_months_data(conn):
+    """获取最近3个月的消费数据汇总"""
+    # 先获取数据库中最新一条数据的时间
+    latest_time_query = """
+    SELECT MAX(TIME) 
+    FROM BILL 
+    WHERE TYPE = '消费'
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(latest_time_query)
+        result = cursor.fetchone()
+        
+        if not result or not result[0]:
+            print("未找到任何消费数据")
+            return []
+        
+        # 解析最新数据的时间
+        latest_time_str = result[0]
+        latest_time = datetime.strptime(latest_time_str, '%Y-%m-%d %H:%M:%S')
+        latest_year = latest_time.year
+        latest_month = latest_time.month
+        
+        print(f"数据库中最新的消费数据时间: {latest_year}年{latest_month}月")
+        
+    except sqlite3.Error as e:
+        print(f"查询最新数据时间错误: {e}")
+        return []
+    except ValueError as e:
+        print(f"解析时间格式错误: {e}")
+        return []
+    
+    # 从最新数据所在的月份开始往前取3个月
+    months = []
+    for i in range(3):
+        target_year = latest_year
+        target_month = latest_month - i
+        
+        # 处理跨年情况
+        while target_month <= 0:
+            target_month += 12
+            target_year -= 1
+        
+        months.append((target_year, target_month))
+    
+    # 按时间倒序排列
+    months.sort(reverse=True)
+    
+    monthly_data = []
+    for year, month in months:
+        year_str = str(year)
+        month_str = f"{month:02d}"
+        date_pattern = f"{year_str}-{month_str}-%"
+        
+        query = """
+        SELECT 
+            SUM(AMOUNT) as total_amount,
+            COUNT(*) as transaction_count,
+            MAX(UPDATE_TIME) as latest_update
+        FROM BILL 
+        WHERE TIME LIKE ? AND TYPE = '消费'
+        """
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, (date_pattern,))
+            result = cursor.fetchone()
+            if result and result[0] is not None:
+                # 有数据的情况
+                monthly_data.append((year, month, float(result[0]), result[1], result[2]))
+            else:
+                # 没有数据的情况，显示为0
+                monthly_data.append((year, month, 0.0, 0, None))
+        except sqlite3.Error as e:
+            print(f"查询{year}年{month}月数据错误: {e}")
+            # 即使查询出错，也添加一个0金额的条目
+            monthly_data.append((year, month, 0.0, 0, None))
+    
+    return monthly_data
+
+def get_summary_latest_update_time(conn):
+    """获取汇总数据的最新更新时间"""
+    query = """
+    SELECT MAX(UPDATE_TIME) 
+    FROM BILL 
+    WHERE TYPE = '消费'
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        result = cursor.fetchone()
+        if result and result[0]:
+            # 将Unix时间戳转换为可读格式
+            update_time = datetime.fromtimestamp(result[0], timezone.utc)
+            return update_time.strftime('%Y-%m-%d %H:%M UTC')
+        return "未知"
+    except sqlite3.Error as e:
+        print(f"获取汇总更新时间错误: {e}")
         return "未知"
 
 def calculate_total_amount(data):
@@ -550,11 +675,178 @@ def generate_annual_html(monthly_data, total_amount, update_time, year):
     
     return html_content
 
+def generate_summary_html(recent_months_data, all_years_data, update_time):
+    """生成历史账单汇总HTML页面"""
+    html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史账单汇总</title>
+    <style>
+        body {{
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: white;
+            color: #333;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+        }}
+        .header {{
+            padding: 20px 0;
+            border-bottom: 1px solid #eee;
+            position: relative;
+        }}
+        .header h1 {{
+            margin: 0 0 20px 0;
+            font-size: 1.8em;
+            font-weight: 500;
+            color: #333;
+        }}
+        .update-time {{
+            position: absolute;
+            top: 20px;
+            right: 0;
+            font-size: 0.9em;
+            color: #666;
+            text-align: right;
+        }}
+        .section {{
+            margin: 30px 0;
+        }}
+        .section-title {{
+            font-size: 1.2em;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 20px;
+        }}
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .summary-item {{
+            background-color: #e3f2fd;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            text-decoration: none;
+            color: inherit;
+            transition: background-color 0.3s ease;
+        }}
+        .summary-item:hover {{
+            background-color: #bbdefb;
+        }}
+        .summary-period {{
+            font-size: 1em;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 10px;
+        }}
+        .summary-amount {{
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+        }}
+        .years-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }}
+        .year-item {{
+            background-color: #e3f2fd;
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+            text-decoration: none;
+            color: inherit;
+            transition: background-color 0.3s ease;
+        }}
+        .year-item:hover {{
+            background-color: #bbdefb;
+        }}
+        .year-period {{
+            font-size: 0.9em;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 8px;
+        }}
+        .year-amount {{
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #333;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="update-time">数据更新时间<br>{update_time}</div>
+            <h1>历史账单汇总</h1>
+        </div>
+        
+        <div class="section">
+            <div class="section-title">最近3个月消费汇总</div>
+            <div class="summary-grid">"""
+
+    # 添加最近3个月数据
+    for year, month, amount, transaction_count, latest_update in recent_months_data:
+        month_names = ["", "一月", "二月", "三月", "四月", "五月", "六月", 
+                       "七月", "八月", "九月", "十月", "十一月", "十二月"]
+        month_name = month_names[month]
+        
+        # 生成月度账单文件名
+        month_filename = f"bill_{year}_{month:02d}.html"
+        
+        html_content += f"""
+                <a href="{month_filename}" class="summary-item">
+                    <div class="summary-period">{year}年{month:02d}月</div>
+                    <div class="summary-amount">{format_amount(amount)}</div>
+                </a>"""
+
+    html_content += """
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="section-title">各年份消费汇总</div>
+            <div class="years-grid">"""
+
+    # 添加所有年份数据
+    for row in all_years_data:
+        year = row[0]
+        amount = float(row[1])
+        transaction_count = row[2]
+        
+        # 生成年度账单文件名
+        year_filename = f"bill_{year}_annual.html"
+        
+        html_content += f"""
+                <a href="{year_filename}" class="year-item">
+                    <div class="year-period">{year}年</div>
+                    <div class="year-amount">{format_amount(amount)}</div>
+                </a>"""
+
+    html_content += """
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+    
+    return html_content
+
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='生成账单明细HTML页面')
-    parser.add_argument('year', type=int, help='年份 (例如: 2025)')
+    parser.add_argument('year', type=int, nargs='?', help='年份 (例如: 2025)，不指定则生成汇总页面')
     parser.add_argument('--month', type=int, help='月份 (1-12)，不指定则生成年度账单')
+    parser.add_argument('--summary', action='store_true', help='生成历史账单汇总页面')
     parser.add_argument('--db', default='billing.sqlite', help='数据库文件路径 (默认: billing.sqlite)')
     
     args = parser.parse_args()
@@ -563,6 +855,10 @@ def parse_arguments():
     if args.month is not None and not (1 <= args.month <= 12):
         print("错误: 月份必须在1-12之间")
         sys.exit(1)
+    
+    # 如果没有指定年份且没有指定summary，则默认为summary
+    if args.year is None and not args.summary:
+        args.summary = True
     
     return args
 
@@ -573,6 +869,7 @@ def main():
     
     year = args.year
     month = args.month
+    summary = args.summary
     db_path = args.db
     
     # 检查数据库文件是否存在
@@ -591,7 +888,38 @@ def main():
         if not os.path.exists(web_dir):
             os.makedirs(web_dir)
         
-        if month is not None:
+        if summary:
+            # 生成历史账单汇总页面
+            print("正在生成历史账单汇总页面...")
+            
+            # 获取最近3个月数据
+            recent_months_data = get_recent_3_months_data(conn)
+            print(f"找到 {len(recent_months_data)} 个月的数据")
+            
+            # 获取所有年份数据
+            all_years_data = get_all_years_data(conn)
+            print(f"找到 {len(all_years_data)} 年的数据")
+            
+            if not recent_months_data and not all_years_data:
+                print("未找到任何消费数据")
+                return
+            
+            # 获取最新更新时间
+            update_time = get_summary_latest_update_time(conn)
+            print(f"数据更新时间: {update_time}")
+            
+            # 生成HTML
+            print("正在生成汇总HTML页面...")
+            html_content = generate_summary_html(recent_months_data, all_years_data, update_time)
+            
+            # 保存HTML文件
+            output_file = os.path.join(web_dir, "bill_summary.html")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"汇总HTML页面已生成: {output_file}")
+            
+        elif month is not None:
             # 生成月度账单
             print(f"正在提取{year}年{month}月消费数据...")
             data = get_monthly_data(conn, year, month)
