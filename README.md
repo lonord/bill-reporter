@@ -8,6 +8,10 @@
 - `generate_bill_report.py`: 手动生成指定月份/年份/汇总账单的详细程序
 - `main.py`: 智能账单生成主程序，自动检测并生成需要更新的账单
 
+效果图：
+
+![项目截图](doc/screenshot1.png)
+
 ---
 
 # 账单生成主程序 (main.py)
